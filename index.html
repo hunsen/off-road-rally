@@ -215,10 +215,14 @@ function updateCar(dt) {
     const springForce = sink * CONFIG.suspensionStiffness;
     car.vy -= springForce;
 
-    // Dampen velocity toward ground angle
-    const targetAngle = groundAngle;
-    const angleDiff = targetAngle - car.angle;
-    car.angularVel += angleDiff * 0.05;
+    // Only snap to terrain on gentle slopes
+    const slopeAbs = abs(groundAngle);
+    const maxSnapAngle = 0.6; // ~34 degrees
+    if (slopeAbs < maxSnapAngle) {
+      const snapFactor = 0.1 + abs(car.speed) * 0.02;
+      car.angle = lerp(car.angle, groundAngle, snapFactor);
+    }
+    // On steep slopes, car keeps its trajectory (realistic)
 
     // Engine power along slope
     if (input.right) {
@@ -234,24 +238,21 @@ function updateCar(dt) {
       shakeAmount = min(shakeAmount + 0.5, 3);
     }
 
-    // Gravity on slope
-    car.speed -= sin(groundAngle) * gravity * 0.5;
+    // Gravity on slope - less aggressive so car can climb
+    car.speed -= sin(groundAngle) * gravity * 0.35;
 
     // Friction
     car.speed *= 0.995;
 
-    // Rotate car based on terrain and speed
-    car.angle = lerp(car.angle, targetAngle, 0.1 + abs(car.speed) * 0.02);
-
     // Wheel spin
     car.wheelAngle += car.speed * 0.15;
 
-    // Velocity from speed
+    // Velocity from speed - use actual angle for direction
     car.vx = cos(car.angle) * car.speed;
-    car.vy = sin(car.angle) * car.speed * 0.3;
+    car.vy = sin(car.angle) * car.speed * 0.5; // more vertical for steep climbs
 
-    // Clamp angle
-    car.angle = constrain(car.angle, -CONFIG.maxTilt, CONFIG.maxTilt);
+    // Clamp angle - wider range for steep climbing
+    car.angle = constrain(car.angle, -1.8, 1.2);
 
     // Particles from wheels
     if (abs(car.speed) > 1.5) {
@@ -290,9 +291,12 @@ function updateCar(dt) {
     car.angularVel *= 0.5;
   }
 
-  // Check if flipped (car upside down)
+  // Check if flipped (car upside down — nose pointing down for too long)
   const normalizedAngle = ((car.angle % TWO_PI) + TWO_PI) % TWO_PI;
-  if (normalizedAngle > 1.6 && normalizedAngle < 4.8 && car.grounded) {
+  // Only count as flipped if angle > 120 degrees AND car is on steep terrain
+  const steepSlope = getTerrainAngle(car.x);
+  const steepSlopeAbs = abs(steepSlope);
+  if (normalizedAngle > 2.1 && normalizedAngle < 4.2 && car.grounded && steepSlopeAbs < 0.5) {
     if (!car.flipped) {
       // Just flipped - game over
       gameState = 'gameover';
