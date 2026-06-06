@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>越野狂飙 — Off-Road Rally</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
+<script>p5.disableFriendlyErrors = true;</script>
+<style>
+html, body { margin: 0; padding: 0; overflow: hidden; background: #1a0a00; touch-action: none; user-select: none; -webkit-user-select: none; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<script>
+// ============================================================
+//  🏔️ 越野狂飙 — Off-Road Rally Climbing Game
+// ============================================================
+
+// === CONFIG ===
+const CONFIG = {
+  terrainSeed: 42,
+  terrainSegments: 3000,
+  segmentWidth: 12,
+  terrainOctaves: 6,
+  terrainFrequency: 0.003,
+  terrainAmplitude: 280,
+  baseY: 500,
+  gravity: 0.35,
+  carMaxSpeed: 6,
+  carAccel: 0.18,
+  carBrake: 0.3,
+  carTurnSpeed: 0.035,
+  carBounce: 0.6,
+  carRotationDamp: 0.92,
+  suspensionStiffness: 0.12,
+  suspensionDamp: 0.82,
+  wheelRadius: 16,
+  wheelBase: 52,
+  wheelOffsetX: 30,
+  wheelOffsetY: 18,
+  maxTilt: 1.4,
+  particlesSpawnRate: 3,
+  starsCount: 200,
+  parallaxLayers: 4,
+  cameraLerp: 0.08,
+  cameraYOffset: 250,
+  gameOverFps: 5,
+};
+
+// === COLOR PALETTE ===
+const COLORS = {
+  skyTop: [0, 0, 5],
+  skyMid: [25, 85, 70],
+  skyBottom: [35, 95, 80],
+  sun: [30, 95, 95],
+  sunGlow: [20, 70, 85],
+  star: [50, 10, 98],
+  mountain1: [20, 55, 15],
+  mountain2: [18, 50, 12],
+  mountain3: [15, 45, 10],
+  ground: [22, 40, 18],
+  groundDark: [12, 25, 8],
+  groundLight: [28, 48, 22],
+  dirt: [30, 50, 25],
+  carBody: [355, 70, 70],
+  carBodyDark: [10, 50, 45],
+  carWheel: [0, 0, 15],
+  carWheelRim: [0, 0, 80],
+  carWindow: [200, 30, 75],
+  particleDirt: [25, 45, 28],
+  particleDust: [30, 30, 40],
+  ui: [50, 20, 95],
+  uiHighlight: [25, 80, 95],
+  gameOverBg: [5, 50, 10],
+};
+
+// === GLOBALS ===
+let terrain = [];
+let stars = [];
+let mountains = [];
+let particles = [];
+let car;
+let camera = { x: 0, y: 0 };
+let gameState = 'menu'; // menu, playing, gameover
+let maxHeight = 0;
+let bestHeight = 0;
+let frameCountStart = 0;
+let input = { left: false, right: false, brake: false, reset: false };
+let shakeAmount = 0;
+let flashAlpha = 0;
+let isMobile = false;
+let touchBtns = {};  // touch buttons: { left, right, brake }
+
+// === TERRAIN GENERATION ===
+function generateTerrain() {
+  terrain = [];
+  const seed = CONFIG.terrainSeed;
+  noiseSeed(seed);
+
+  for (let i = 0; i < CONFIG.terrainSegments; i++) {
+    const x = i * CONFIG.segmentWidth;
+    let y = CONFIG.baseY;
+
+    // Multi-octave Perlin noise for terrain
+    const n1 = noise(i * CONFIG.terrainFrequency);
+    const n2 = noise(i * CONFIG.terrainFrequency * 2.1 + 100);
+    const n3 = noise(i * CONFIG.terrainFrequency * 4.3 + 200);
+    const n4 = noise(i * CONFIG.terrainFrequency * 0.7 + 300);
+
+    // Progressive difficulty - gets steeper further along
+    const difficulty = 1 + i * 0.0003;
+
+    y -= (n1 * 0.5 + n2 * 0.25 + n3 * 0.15 + n4 * 0.1) * CONFIG.terrainAmplitude * difficulty;
+    y += i * 0.15; // General upward trend
+
+    // Create some dramatic sections
+    const section = Math.floor(i / 150);
+    if (section % 5 === 0 && i % 150 < 80) {
+      y -= noise(i * 0.02) * 80;
+    }
+
+    terrain.push({ x: x, y: y });
+  }
+}
+
+function getTerrainY(x) {
+  const idx = x / CONFIG.segmentWidth;
+  const i = floor(idx);
+  const t = idx - i;
+
+  if (i < 0) return terrain[0].y;
+  if (i >= terrain.length - 1) return terrain[terrain.length - 1].y;
+
+  const p1 = terrain[i];
+  const p2 = terrain[i + 1];
+  return lerp(p1.y, p2.y, t);
+}
+
+function getTerrainAngle(x) {
+  const dy = getTerrainY(x + 4) - getTerrainY(x - 4);
+  return Math.atan2(dy, 8);
+}
+
+// === STARS ===
+function generateStars() {
+  stars = [];
+  randomSeed(99);
+  for (let i = 0; i < CONFIG.starsCount; i++) {
+    stars.push({
+      x: random(-200, width + 200),
+      y: random(0, height * 0.5),
+      size: random(1, 3.5),
+      twinkleSpeed: random(0.02, 0.08),
+      twinkleOffset: random(TWO_PI),
+      brightness: random(100, 200),
+    });
+  }
+}
+
+// === MOUNTAINS ===
+function generateMountains() {
+  mountains = [];
+  randomSeed(77);
+  for (let layer = 0; layer < CONFIG.parallaxLayers; layer++) {
+    const pts = [];
+    const segments = 20 + layer * 8;
+    for (let i = 0; i <= segments; i++) {
+      pts.push({
+        x: i * (width + 400) / segments - 200,
+        y: height * (0.35 + layer * 0.1) - noise(layer * 100 + i * 0.5) * (150 - layer * 25),
+        height: noise(layer * 50 + i * 0.3) * (120 - layer * 20),
+      });
+    }
+    mountains.push({ points: pts, parallax: 0.1 + layer * 0.15, darkness: layer });
+  }
+}
+
+// === CAR ===
+function initCar() {
+  car = {
+    x: 200,
+    y: getTerrainY(200) - CONFIG.wheelOffsetY - 20,
+    vx: 0,
+    vy: 0,
+    angle: 0,
+    angularVel: 0,
+    speed: 0,
+    wheelAngle: 0,
+    suspensionL: 0,
+    suspensionR: 0,
+    velSusL: 0,
+    velSusR: 0,
+    grounded: false,
+    flipped: false,
+    trail: [],
+  };
+}
+
+function updateCar(dt) {
+  const gravity = CONFIG.gravity;
+  const maxSpeed = CONFIG.carMaxSpeed;
+  const accel = CONFIG.carAccel;
+  const turnSpeed = CONFIG.carTurnSpeed;
+
+  // Ground contact check
+  const groundY = getTerrainY(car.x);
+  const groundAngle = getTerrainAngle(car.x);
+  const wheelBottom = car.y + CONFIG.wheelOffsetY + CONFIG.wheelRadius * 0.3;
+  car.grounded = wheelBottom >= groundY - 5;
+
+  if (car.grounded) {
+    // Spring force to push car above ground
+    const sink = wheelBottom - groundY;
+    const springForce = sink * CONFIG.suspensionStiffness;
+    car.vy -= springForce;
+
+    // Dampen velocity toward ground angle
+    const targetAngle = groundAngle;
+    const angleDiff = targetAngle - car.angle;
+    car.angularVel += angleDiff * 0.05;
+
+    // Engine power along slope
+    if (input.right) {
+      car.speed = min(car.speed + accel, maxSpeed);
+    }
+    if (input.left) {
+      car.speed = max(car.speed - accel * 0.7, -maxSpeed * 0.4);
+    }
+
+    // Braking
+    if (input.brake) {
+      car.speed *= 0.92;
+      shakeAmount = min(shakeAmount + 0.5, 3);
+    }
+
+    // Gravity on slope
+    car.speed -= sin(groundAngle) * gravity * 0.5;
+
+    // Friction
+    car.speed *= 0.995;
+
+    // Rotate car based on terrain and speed
+    car.angle = lerp(car.angle, targetAngle, 0.1 + abs(car.speed) * 0.02);
+
+    // Wheel spin
+    car.wheelAngle += car.speed * 0.15;
+
+    // Velocity from speed
+    car.vx = cos(car.angle) * car.speed;
+    car.vy = sin(car.angle) * car.speed * 0.3;
+
+    // Clamp angle
+    car.angle = constrain(car.angle, -CONFIG.maxTilt, CONFIG.maxTilt);
+
+    // Particles from wheels
+    if (abs(car.speed) > 1.5) {
+      for (let p = 0; p < CONFIG.particlesSpawnRate; p++) {
+        spawnParticle(car.x - cos(car.angle) * CONFIG.wheelOffsetX, car.y + CONFIG.wheelOffsetY, 'dirt');
+      }
+    }
+  } else {
+    // Air control
+    if (input.right) car.angularVel += turnSpeed * 0.5;
+    if (input.left) car.angularVel -= turnSpeed * 0.5;
+
+    car.speed *= 0.98;
+    car.wheelAngle += car.speed * 0.08;
+
+    // Gravity
+    car.vy += gravity;
+
+    // Air drag
+    car.vx *= 0.999;
+  }
+
+  // Angular damping
+  car.angularVel *= CONFIG.carRotationDamp;
+  car.angle += car.angularVel;
+
+  // Update position
+  car.x += car.vx;
+  car.y += car.vy;
+
+  // Ground collision safety
+  const currentGroundY = getTerrainY(car.x);
+  if (car.y + CONFIG.wheelOffsetY + 10 > currentGroundY) {
+    car.y = currentGroundY - CONFIG.wheelOffsetY - 10;
+    car.vy = 0;
+    car.angularVel *= 0.5;
+  }
+
+  // Check if flipped (car upside down)
+  const normalizedAngle = ((car.angle % TWO_PI) + TWO_PI) % TWO_PI;
+  if (normalizedAngle > 1.6 && normalizedAngle < 4.8 && car.grounded) {
+    if (!car.flipped) {
+      // Just flipped - game over
+      gameState = 'gameover';
+      if (maxHeight > bestHeight) bestHeight = maxHeight;
+      shakeAmount = 10;
+      flashAlpha = 200;
+    }
+  } else {
+    car.flipped = false;
+  }
+
+  // Track max height (inverted: lower Y = higher)
+  const altitude = floor((CONFIG.baseY - car.y) / 5);
+  if (altitude > maxHeight) maxHeight = altitude;
+
+  // Trail
+  car.trail.push({ x: car.x, y: car.y, alpha: 255 });
+  if (car.trail.length > 80) car.trail.shift();
+}
+
+function drawCar() {
+  push();
+  translate(car.x - camera.x, car.y - camera.y);
+  rotate(car.angle);
+
+  const w = CONFIG.wheelBase;
+  const h = CONFIG.wheelOffsetY;
+
+  // Shadow
+  fill(0, 0, 0, 40);
+  noStroke();
+  const groundY = getTerrainY(car.x) - camera.y;
+  ellipse(w / 2, groundY - car.y + camera.y + 5, w + 10, 6);
+
+  // Car body
+  push();
+  fill(red(COLORS.carBody), green(COLORS.carBody), blue(COLORS.carBody), 240);
+  stroke(red(COLORS.carBodyDark), green(COLORS.carBodyDark), blue(COLORS.carBodyDark), 200);
+  strokeWeight(2);
+
+  // Main body shape
+  beginShape();
+  vertex(-w/2 + 5, -h + 2);
+  vertex(-w/2 + 8, -h - 10);
+  vertex(-w/2 + 20, -h - 18);
+  vertex(w/2 - 5, -h - 16);
+  vertex(w/2 + 2, -h - 8);
+  vertex(w/2 + 6, -h + 2);
+  endShape(CLOSE);
+
+  // Roof/window
+  fill(COLORS.carWindow[0], COLORS.carWindow[1], COLORS.carWindow[2], 100);
+  noStroke();
+  beginShape();
+  vertex(-w/2 + 14, -h - 16);
+  vertex(-w/2 + 22, -h - 26);
+  vertex(w/2 - 8, -h - 26);
+  vertex(w/2 - 2, -h - 16);
+  endShape(CLOSE);
+
+  // Roof highlight
+  fill(red(COLORS.carBody), green(COLORS.carBody), blue(COLORS.carBody), 100);
+  strokeWeight(1);
+  stroke(red(COLORS.carBodyDark), green(COLORS.carBodyDark), blue(COLORS.carBodyDark), 150);
+  beginShape();
+  vertex(-w/2 + 14, -h - 16);
+  vertex(-w/2 + 22, -h - 26);
+  vertex(w/2 - 8, -h - 26);
+  vertex(w/2 - 2, -h - 16);
+  endShape(CLOSE);
+
+  // Headlight
+  noStroke();
+  fill(25, 95, 98, 180);
+  ellipse(w/2 + 3, -h - 2, 5, 4);
+
+  // Tail light
+  fill(255, 30, 20, 180);
+  ellipse(-w/2 + 5, -h, 4, 3);
+
+  pop();
+
+  // Wheels
+  drawWheel(-w/2 + 12, h, CONFIG.wheelRadius);
+  drawWheel(w/2 - 10, h, CONFIG.wheelRadius);
+
+  pop();
+}
+
+function drawWheel(x, y, r) {
+  push();
+  translate(x, y);
+  rotate(car.wheelAngle);
+
+  // Tire
+  noStroke();
+  fill(COLORS.carWheel[0], COLORS.carWheel[1], COLORS.carWheel[2]);
+  ellipse(0, 0, r * 2, r * 2);
+
+  // Tread marks
+  stroke(COLORS.carWheel[0], COLORS.carWheel[1], COLORS.carWheel[2] + 20, 120);
+  strokeWeight(2);
+  for (let a = 0; a < PI; a += PI / 6) {
+    const tx = cos(a) * r * 0.8;
+    const ty = sin(a) * r * 0.8;
+    line(cos(a) * r * 0.5, sin(a) * r * 0.5, tx, ty);
+  }
+
+  // Hub
+  noStroke();
+  fill(COLORS.carWheelRim[0], COLORS.carWheelRim[1], COLORS.carWheelRim[2], 200);
+  ellipse(0, 0, r * 0.5, r * 0.5);
+
+  pop();
+}
+
+// === PARTICLES ===
+function spawnParticle(x, y, type) {
+  if (particles.length > 300) return;
+  const dir = -car.speed * 0.5;
+  particles.push({
+    x: x,
+    y: y,
+    vx: dir + random(-2, 1),
+    vy: random(-3, -0.5),
+    life: 1,
+    decay: random(0.01, 0.035),
+    size: random(2, type === 'dirt' ? 6 : 4),
+    type: type,
+    rotation: random(TWO_PI),
+    rotSpeed: random(-0.1, 0.1),
+  });
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.1; // gravity
+    p.vx *= 0.98;
+    p.life -= p.decay;
+    p.rotation += p.rotSpeed;
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+    }
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    push();
+    translate(p.x - camera.x, p.y - camera.y);
+    rotate(p.rotation);
+    noStroke();
+
+    if (p.type === 'dirt') {
+      fill(COLORS.particleDirt[0], COLORS.particleDirt[1], COLORS.particleDirt[2], p.life * 180);
+    } else {
+      fill(COLORS.particleDust[0], COLORS.particleDust[1], COLORS.particleDust[2], p.life * 150);
+    }
+    rect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
+    pop();
+  }
+}
+
+// === CAMERA ===
+function updateCamera() {
+  const targetX = car.x - width * 0.35;
+  const targetY = car.y - CONFIG.cameraYOffset;
+  camera.x = lerp(camera.x, targetX, CONFIG.cameraLerp);
+  camera.y = lerp(camera.y, targetY, CONFIG.cameraLerp);
+
+  // Screen shake
+  if (shakeAmount > 0) {
+    camera.x += random(-shakeAmount, shakeAmount);
+    camera.y += random(-shakeAmount, shakeAmount);
+    shakeAmount *= 0.9;
+    if (shakeAmount < 0.1) shakeAmount = 0;
+  }
+}
+
+// === DRAWING ===
+function drawSky() {
+  // Gradient sky
+  for (let y = 0; y < height; y++) {
+    const t = y / height;
+    const c = lerpColor(
+      color(COLORS.skyTop[0], COLORS.skyTop[1], COLORS.skyTop[2]),
+      color(COLORS.skyBottom[0], COLORS.skyBottom[1], COLORS.skyBottom[2]),
+      t
+    );
+    stroke(c);
+    strokeWeight(1);
+    line(0, y, width, y);
+  }
+  noStroke();
+
+  // Sun glow
+  const sunX = width * 0.7 - camera.x * 0.05;
+  const sunY = height * 0.35;
+  for (let r = 120; r > 0; r -= 5) {
+    const a = map(r, 0, 120, 200, 0);
+    fill(COLORS.sunGlow[0], COLORS.sunGlow[1], COLORS.sunGlow[2], a);
+    noStroke();
+    ellipse(sunX, sunY, r * 2, r * 2);
+  }
+  fill(COLORS.sun[0], COLORS.sun[1], COLORS.sun[2], 220);
+  ellipse(sunX, sunY, 50, 50);
+}
+
+function drawStars() {
+  const t = millis() * 0.001;
+  noStroke();
+  for (const s of stars) {
+    const twinkle = sin(t * s.twinkleSpeed * 10 + s.twinkleOffset) * 0.3 + 0.7;
+    const sx = (s.x - camera.x * 0.02) % (width + 400);
+    const sy = s.y;
+    fill(COLORS.star[0], COLORS.star[1], COLORS.star[2], s.brightness * twinkle);
+    ellipse(sx, sy, s.size, s.size);
+  }
+}
+
+function drawMountains() {
+  for (let m = 0; m < mountains.length; m++) {
+    const layer = mountains[m];
+    const offset = camera.x * layer.parallax;
+    const dark = layer.darkness;
+
+    push();
+    noStroke();
+
+    const baseAlpha = map(dark, 0, 3, 150, 60);
+    fill(COLORS.mountain1[0] - dark * 3, COLORS.mountain1[1] - dark * 5, COLORS.mountain1[2] - dark * 3, baseAlpha);
+
+    beginShape();
+    vertex(-200 - offset, height + 50);
+    for (const pt of layer.points) {
+      vertex(pt.x - offset, pt.y + sin(millis() * 0.0003 + m) * 2);
+    }
+    vertex(width + 200 - offset, height + 50);
+    endShape(CLOSE);
+    pop();
+  }
+}
+
+function drawTerrain() {
+  const startX = floor(camera.x / CONFIG.segmentWidth) - 2;
+  const endX = startX + ceil(width / CONFIG.segmentWidth) + 6;
+
+  // Terrain body
+  push();
+  noStroke();
+
+  // Gradient fill
+  for (let i = max(0, startX); i < min(terrain.length - 1, endX); i++) {
+    const x1 = terrain[i].x - camera.x;
+    const y1 = terrain[i].y - camera.y;
+    const x2 = terrain[i + 1].x - camera.x;
+    const y2 = terrain[i + 1].y - camera.y;
+
+    const depth = map(y1, 0, height * 2, 0, 1);
+    const c = lerpColor(
+      color(COLORS.groundLight[0], COLORS.groundLight[1], COLORS.groundLight[2]),
+      color(COLORS.groundDark[0], COLORS.groundDark[1], COLORS.groundDark[2]),
+      depth
+    );
+    fill(c);
+    rect(x1, y1, CONFIG.segmentWidth + 1, height - y1 + 100);
+  }
+
+  // Surface line
+  stroke(COLORS.groundLight[0], COLORS.groundLight[1], COLORS.groundLight[2], 200);
+  strokeWeight(3);
+  noFill();
+  beginShape();
+  for (let i = max(0, startX); i < min(terrain.length, endX); i++) {
+    vertex(terrain[i].x - camera.x, terrain[i].y - camera.y);
+  }
+  endShape();
+
+  // Surface detail
+  stroke(COLORS.ground[0] + 8, COLORS.ground[1] + 8, COLORS.ground[2] + 8, 100);
+  strokeWeight(1);
+  beginShape();
+  for (let i = max(0, startX); i < min(terrain.length, endX); i++) {
+    vertex(terrain[i].x - camera.x, terrain[i].y - camera.y - 2);
+  }
+  endShape();
+
+  pop();
+}
+
+function drawTrail() {
+  if (car.trail.length < 2) return;
+  noFill();
+  stroke(COLORS.groundLight[0], COLORS.groundLight[1], COLORS.groundLight[2], 50);
+  strokeWeight(2);
+  beginShape();
+  for (const t of car.trail) {
+    const alpha = map(t.alpha, 255, 0, 80, 0);
+    stroke(COLORS.ground[0], COLORS.ground[1], COLORS.ground[2], alpha);
+    vertex(t.x - camera.x, t.y - camera.y);
+  }
+  endShape();
+}
+
+function drawUI() {
+  push();
+
+  // Altitude
+  fill(COLORS.ui[0], COLORS.ui[1], COLORS.ui[2], 200);
+  noStroke();
+  rect(15, 15, 180, 65, 8);
+
+  fill(COLORS.uiHighlight[0], COLORS.uiHighlight[1], COLORS.uiHighlight[2], 230);
+  textSize(14);
+  textAlign(LEFT, TOP);
+  text('海拔高度', 30, 28);
+
+  textSize(28);
+  textFont('monospace');
+  text(maxHeight + ' m', 30, 48);
+
+  // Best
+  if (bestHeight > 0) {
+    fill(30, 80, 50, 180);
+    textSize(12);
+    text('最佳: ' + bestHeight + ' m', 30, 78);
+  }
+
+  // Speed bar
+  const speedPct = abs(car.speed) / CONFIG.carMaxSpeed;
+  fill(20, 30, 20, 150);
+  rect(15, 90, 180, 12, 4);
+  const speedColor = lerpColor(color(40, 80, 40), color(40, 30, 80), speedPct);
+  fill(speedColor);
+  rect(15, 90, 180 * speedPct, 12, 4);
+
+  // Mini altitude meter
+  const meterX = width - 50;
+  const meterY = 100;
+  const meterH = height - 160;
+  fill(20, 30, 20, 150);
+  rect(meterX, meterY, 16, meterH, 4);
+
+  // Car position on meter
+  const carPos = constrain(map(maxHeight, 0, 500, 0, 1), 0, 1);
+  fill(COLORS.carBody[0], COLORS.carBody[1], COLORS.carBody[2], 220);
+  const indicatorY = meterY + meterH * (1 - carPos);
+  ellipse(meterX + 8, indicatorY, 10, 10);
+
+  // Instructions (fades out)
+  const elapsed = (millis() - frameCountStart) / 1000;
+  if (elapsed < 15 && gameState === 'playing') {
+    const alpha = map(elapsed, 10, 15, 200, 0);
+    fill(255, 255, 255, alpha);
+    textSize(isMobile ? 12 : 13);
+    textAlign(CENTER);
+    if (isMobile) {
+      text('点击屏幕下方按钮控制', width / 2, height - 20);
+    } else {
+      text('← → / A D: 行驶  |  空格: 手刹  |  R: 重置', width / 2, height - 40);
+    }
+  }
+
+  pop();
+}
+
+// === SCREENS ===
+function drawMenu() {
+  drawSky();
+  drawStars();
+
+  // Title
+  push();
+  textAlign(CENTER, CENTER);
+
+  // Title glow
+  for (let r = 30; r > 0; r -= 5) {
+    fill(COLORS.sunGlow[0], COLORS.sunGlow[1], COLORS.sunGlow[2], map(r, 0, 30, 80, 0));
+    noStroke();
+    textSize(60 + r);
+    text('越野狂飙', width / 2, height / 2 - 100);
+  }
+
+  fill(COLORS.sun[0], COLORS.sun[1], COLORS.sun[2], 240);
+  textSize(60);
+  text('越野狂飙', width / 2, height / 2 - 100);
+
+  // Subtitle
+  fill(200, 200, 210, 180);
+  textSize(18);
+  text('O F F - R O A D   R A L L Y', width / 2, height / 2 - 50);
+
+  // Instructions
+  fill(255, 255, 255, 200);
+  textSize(isMobile ? 14 : 15);
+  if (isMobile) {
+    text('手指点击屏幕下方按钮控制车辆', width / 2, height / 2);
+    text('点击任意位置开始', width / 2, height / 2 + 35);
+  } else {
+    text('控制越野车在无限山地中尽可能爬上更高', width / 2, height / 2);
+    text('方向键/WSAD: 前进后退  |  空格: 手刹', width / 2, height / 2 + 30);
+  }
+
+  // Start prompt
+  const blink = sin(millis() * 0.004) * 0.3 + 0.7;
+  fill(COLORS.sunGlow[0], COLORS.sunGlow[1], COLORS.sunGlow[2], blink * 220);
+  textSize(22);
+  text('点击屏幕 或 按回车开始', width / 2, height / 2 + 90);
+
+  if (bestHeight > 0) {
+    fill(30, 80, 50, 180);
+    textSize(16);
+    text('🏆 历史最佳: ' + bestHeight + ' m', width / 2, height / 2 + 130);
+  }
+
+  pop();
+}
+
+function drawGameOver() {
+  drawTerrain();
+  drawTrail();
+  drawCar();
+
+  // Game over overlay
+  push();
+  fill(COLORS.gameOverBg[0], COLORS.gameOverBg[1], COLORS.gameOverBg[2], 180);
+  noStroke();
+  rect(0, 0, width, height);
+
+  textAlign(CENTER, CENTER);
+
+  // Title
+  fill(255, 50, 30, 230);
+  textSize(48);
+  text('翻车了!', width / 2, height / 2 - 80);
+
+  // Score
+  fill(255, 255, 255, 220);
+  textSize(24);
+  text('最终海拔: ' + maxHeight + ' m', width / 2, height / 2 - 20);
+
+  if (maxHeight >= bestHeight && maxHeight > 0) {
+    fill(30, 80, 50, 230);
+    textSize(18);
+    text('🎉 新纪录!', width / 2, height / 2 + 15);
+  }
+
+  // Retry
+  const blink = sin(millis() * 0.004) * 0.3 + 0.7;
+  fill(COLORS.sunGlow[0], COLORS.sunGlow[1], COLORS.sunGlow[2], blink * 220);
+  textSize(20);
+  text('按 R 或 点击 重新开始', width / 2, height / 2 + 70);
+
+  pop();
+}
+
+// === GAME LOGIC ===
+function startGame() {
+  gameState = 'playing';
+  frameCountStart = millis();
+  maxHeight = 0;
+  particles = [];
+  initCar();
+  camera.x = car.x - width * 0.35;
+  camera.y = car.y - CONFIG.cameraYOffset;
+}
+
+function resetCar() {
+  if (gameState === 'gameover') {
+    startGame();
+    return;
+  }
+  // Reset car to ground
+  car.y = getTerrainY(car.x) - CONFIG.wheelOffsetY - 20;
+  car.vx = 0;
+  car.vy = 0;
+  car.angle = 0;
+  car.angularVel = 0;
+  car.speed = 0;
+  car.flipped = false;
+  car.wheelAngle = 0;
+}
+
+// === SETUP ===
+// === TOUCH BUTTONS ===
+function touchBtnInit() {
+  if (touchBtns.left && touchBtns.right) return; // already initialized
+  const sz = isMobile ? min(width, height) * 0.13 : 0;
+  const pad = 20;
+  const bottom = height - pad - sz;
+  touchBtns = {
+    left:  { x: pad, y: bottom, size: sz, label: '◀', active: false },
+    right: { x: width - pad - sz, y: bottom, size: sz, label: '▶', active: false },
+    brake: { x: width / 2 - sz * 0.8, y: bottom, size: sz * 1.6, label: '刹车', active: false },
+  };
+}
+
+function touchBtnDraw(btn) {
+  if (!isMobile || btn.size <= 0) return;
+  push();
+  noStroke();
+
+  // Button background
+  const alpha = btn.active ? 180 : 80;
+  fill(0, 0, 0, alpha);
+  rectMode(CENTER);
+  rect(btn.x, btn.y, btn.size + 16, btn.size + 16, 14);
+
+  // Button border glow when active
+  if (btn.active) {
+    fill(255, 255, 255, 120);
+    rect(btn.x, btn.y, btn.size + 20, btn.size + 20, 14);
+  }
+
+  // Label
+  fill(255, 255, 255, btn.active ? 240 : 160);
+  textSize(btn.size * 0.45);
+  textAlign(CENTER, CENTER);
+  text(btn.label, btn.x, btn.y);
+  pop();
+}
+
+function touchBtnContains(btn, tx, ty) {
+  const half = btn.size * 0.6;
+  return abs(tx - btn.x) < half && abs(ty - btn.y) < half;
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(1);
+  generateTerrain();
+  generateStars();
+  generateMountains();
+  initCar();
+  detectMobile();
+  touchBtnInit();
+  textAlign(LEFT, TOP);
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  generateMountains();
+  detectMobile();
+}
+
+// === MOBILE DETECTION ===
+function detectMobile() {
+  isMobile = (window.innerWidth < 1024 || 'ontouchstart' in window);
+}
+
+function draw() {
+  if (gameState === 'menu') {
+    drawMenu();
+    return;
+  }
+
+  if (gameState === 'playing') {
+    updateCar(1);
+    updateParticles();
+  }
+
+  updateCamera();
+
+  // Flash effect
+  if (flashAlpha > 0) {
+    noStroke();
+    fill(255, 255, 255, flashAlpha);
+    rect(0, 0, width, height);
+    flashAlpha -= 10;
+  }
+
+  // Draw scene
+  drawSky();
+  drawStars();
+  drawMountains();
+  drawTerrain();
+  drawTrail();
+  drawParticles();
+  drawCar();
+  drawUI();
+
+  if (gameState === 'gameover') {
+    drawGameOver();
+    updateParticles();
+  }
+
+  // Draw touch buttons (mobile only)
+  if (isMobile && (gameState === 'playing' || gameState === 'gameover')) {
+    touchBtnDraw(touchBtns.left);
+    touchBtnDraw(touchBtns.right);
+    touchBtnDraw(touchBtns.brake);
+  }
+}
+
+function keyPressed() {
+  if (key === 'ArrowRight' || key === 'd' || key === 'D' || key === 'w' || key === 'W') {
+    input.right = true;
+  }
+  if (key === 'ArrowLeft' || key === 'a' || key === 'A' || key === 's' || key === 'S') {
+    input.left = true;
+  }
+  if (key === ' ') {
+    input.brake = true;
+    return false; // prevent page scroll
+  }
+  if (key === 'r' || key === 'R') {
+    resetCar();
+  }
+  if (keyCode === ENTER || keyCode === RETURN) {
+    if (gameState === 'menu') {
+      startGame();
+    } else if (gameState === 'gameover') {
+      startGame();
+    }
+  }
+}
+
+function keyReleased() {
+  if (key === 'ArrowRight' || key === 'd' || key === 'D' || key === 'w' || key === 'W') {
+    input.right = false;
+  }
+  if (key === 'ArrowLeft' || key === 'a' || key === 'A' || key === 's' || key === 'S') {
+    input.left = false;
+  }
+  if (key === ' ') {
+    input.brake = false;
+  }
+}
+
+function mousePressed() {
+  if (gameState === 'menu') {
+    startGame();
+  } else if (gameState === 'gameover') {
+    startGame();
+  }
+}
+
+function touchStarted() {
+  detectMobile();
+  touchBtnInit();
+
+  if (gameState === 'menu') {
+    startGame();
+    return false;
+  } else if (gameState === 'gameover') {
+    startGame();
+    return false;
+  }
+
+  // Check touch buttons
+  const tx = touch.x;
+  const ty = touch.y;
+
+  if (touchBtnContains(touchBtns.left, tx, ty)) {
+    input.left = true;
+    touchBtns.left.active = true;
+    return false;
+  }
+  if (touchBtnContains(touchBtns.right, tx, ty)) {
+    input.right = true;
+    touchBtns.right.active = true;
+    return false;
+  }
+  if (touchBtnContains(touchBtns.brake, tx, ty)) {
+    input.brake = true;
+    touchBtns.brake.active = true;
+    return false;
+  }
+
+  return false; // prevent default
+}
+
+function touchMoved() {
+  return false; // prevent page scroll
+}
+
+function touchEnded() {
+  // Release all touch buttons
+  input.left = false;
+  input.right = false;
+  input.brake = false;
+  touchBtns.left.active = false;
+  touchBtns.right.active = false;
+  touchBtns.brake.active = false;
+  return false; // prevent default
+}
+</script>
+</body>
+</html>
